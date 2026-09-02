@@ -1,0 +1,47 @@
+[project]
+name = "aichessathon-starter"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "chess==1.11.2",
+    "numpy==2.5.2",
+    "numba==0.67.0",
+    "torch==2.13.0",
+    "onnxruntime==1.29.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = ["mypy>=1.18", "ruff>=0.14"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# refs/ holds frozen copies of earlier engines, kept only as sparring opponents
+exclude = ["refs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["N818"]
+
+[tool.mypy]
+strict = true
+files = ["agent.py", "harness"]
+exclude = ["^refs/"]
+
+[[tool.mypy.overrides]]
+# numba has no stubs, and the jitted modules are typed by numba at compile time rather
+# than by annotations mypy can check
+module = ["numba.*", "board", "evaluate", "search", "magics"]
+ignore_missing_imports = true
+follow_imports = "skip"
