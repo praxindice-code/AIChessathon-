@@ -71,7 +71,7 @@ NNUE_STACK_SIZE = 128  # safe upper bound over search.py's actual STACK (104); a
                         # circular import just to match it exactly
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def nnue_init_root(bb, acc, psqt):  # type: ignore[no-untyped-def]
     """Call once, at the very start of a search, to populate ply 0's accumulators from
     scratch. `acc` is shaped (STACK, 2, L1), `psqt` (STACK, 2, num_psqt_buckets) -- both
@@ -82,7 +82,7 @@ def nnue_init_root(bb, acc, psqt):  # type: ignore[no-untyped-def]
     refresh_accumulator(bb, False, acc[0, 1], psqt[0, 1])
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def nnue_make_move(bbs, mbs, acc, psqt, ply):  # type: ignore[no-untyped-def]
     """Call immediately AFTER board.make_move(bbs, sts, mbs, ply, move) has written ply+1.
     Diffs the mailbox at ply vs ply+1 to find every square that changed, rather than
@@ -109,21 +109,28 @@ def nnue_make_move(bbs, mbs, acc, psqt, ply):  # type: ignore[no-untyped-def]
         _apply_diff(bbs, mbs, ply, False, acc[ply + 1, 1], psqt[ply + 1, 1])
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def _apply_diff(bbs, mbs, ply, is_white_pov, acc_out, psqt_out):  # type: ignore[no-untyped-def]
     pov_colour = 0 if is_white_pov else 1
     king_sq = lsb(bbs[ply, 7] & bbs[ply, pov_colour])
-    for sq in range(64):
+    # Option A optimization: iterate only over squares that actually changed. Build a bitboard
+    # of changed squares by XORing all 8 bitboard planes (white, black, and the 6 piece-type
+    # planes) between ply and ply+1 — any square whose contents changed will have at least one
+    # bit differ across some plane. This covers piece add/remove (color bit flips), promotion
+    # (piece-type bit changes), and same-type capture (color bits flip). Typically only 2-4
+    # squares change per move, so this replaces ~60 wasted branchy iterations with a few
+    # `lsb`-driven ones. Backup of the original 64-square-scan version lives at
+    # `nnue_pre_optionA.py.bak` in the same folder.
+    changed = np.int64(0)
+    for plane in range(8):
+        changed |= bbs[ply, plane] ^ bbs[ply + 1, plane]
+    while changed:
+        sq = lsb(changed)
+        changed &= changed - 1
         before_piece = mbs[ply, sq]
         after_piece = mbs[ply + 1, sq]
         before_white = (bbs[ply, 0] & bit(sq)) != 0
         after_white = (bbs[ply + 1, 0] & bit(sq)) != 0
-        # mbs alone isn't enough to detect "nothing changed here": a same-type capture (pawn
-        # takes pawn, most commonly) leaves the piece TYPE identical while the colour flips, so
-        # the identity check has to include colour too, or a capture like that gets silently
-        # treated as a no-op and the accumulator never gets updated for that square at all
-        if before_piece == after_piece and (before_piece == 0 or before_white == after_white):
-            continue
         if before_piece != 0:
             idx = perspective_feature(is_white_pov, sq, before_piece, before_white, king_sq)
             acc_out -= FT_WEIGHT[idx]
@@ -134,7 +141,7 @@ def _apply_diff(bbs, mbs, ply, is_white_pov, acc_out, psqt_out):  # type: ignore
             psqt_out += FT_PSQT_WEIGHT[idx]
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def nnue_make_null(acc, psqt, ply):  # type: ignore[no-untyped-def]
     """Null move: no piece placement changes, so both perspectives' accumulators carry over
     unchanged."""
@@ -144,7 +151,7 @@ def nnue_make_null(acc, psqt, ply):  # type: ignore[no-untyped-def]
     psqt[ply + 1, 1] = psqt[ply, 1]
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def nnue_eval(acc, psqt, side, piece_count, ply):  # type: ignore[no-untyped-def]
     """Reads this ply's already-maintained accumulators (via nnue_make_move/nnue_make_null)
     and runs the forward pass. Does not touch the board at all -- purely a function of
@@ -165,7 +172,7 @@ def new_accumulator_stack():
     return acc, psqt
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def orient(is_white_pov, sq, ksq):  # type: ignore[no-untyped-def]
     kfile = ksq & 7
     flip_h = 7 if kfile < 4 else 0
@@ -173,7 +180,7 @@ def orient(is_white_pov, sq, ksq):  # type: ignore[no-untyped-def]
     return (flip_h ^ flip_v) ^ sq
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def perspective_feature(is_white_pov, sq, piece_type, piece_is_white, king_sq):  # type: ignore[no-untyped-def]
     """Feature row index for one piece, from one perspective. `piece_is_white`: True/False.
     `is_white_pov`: which perspective's accumulator this contributes to."""
@@ -193,7 +200,7 @@ def perspective_feature(is_white_pov, sq, piece_type, piece_is_white, king_sq): 
     return base + p_idx10 * 64 + osq
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def refresh_accumulator(bb, is_white_pov, acc_out, psqt_out):  # type: ignore[no-untyped-def]
     """Full recompute of one perspective's raw accumulator + psqt vector from a bb array."""
     pov_colour = 0 if is_white_pov else 1
@@ -214,7 +221,7 @@ def refresh_accumulator(bb, is_white_pov, acc_out, psqt_out):  # type: ignore[no
                 psqt_out += FT_PSQT_WEIGHT[idx]
 
 
-@njit(cache=False)
+@njit(cache=False, fastmath=True)
 def forward(white_acc, black_acc, white_psqt, black_psqt, side, piece_count):  # type: ignore[no-untyped-def]
     """Combines both perspectives' raw accumulators into a final centipawn-ish score. `side`:
     0 = white to move, 1 = black to move."""

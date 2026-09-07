@@ -1,0 +1,19 @@
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS metadata
+.DS_Store
+
+# common editor/OS junk
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# test/eval artifacts we generated in this repo
+*.pgn
+*.bak
+*_pre_*.py
