@@ -13,6 +13,19 @@ __pycache__/
 .vscode/
 .idea/
 
+# packaged submissions and any other archives, at any depth (build here, don't commit)
+*.zip
+*.tar.gz
+*.tgz
+*.tar
+*.rar
+*.7z
+# folders produced by unpacking a submission zip for inspection
+*_unzipped/
+*_extracted/
+unzipped/
+extracted/
+
 # test/eval artifacts we generated in this repo
 *.pgn
 *.bak

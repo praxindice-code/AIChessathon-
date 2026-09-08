@@ -77,10 +77,6 @@ CORR_MAX = 512  # centipawns; a correction bigger than this is almost certainly 
 CORR_SCALE = 256  # fixed-point scale so small per-node updates don't round to zero
 OFF_CORRECTION = OFF_PATH + GAME_KEYS + STACK
 MEM_WORDS = OFF_CORRECTION + 2 * CORR_SIZE
-# converts NNUE's raw (normalized) output into the same integer centipawn-ish scale evaluate()
-# already uses — must match the nnue-pytorch trainer's own default `nnue2score` (600.0); if a
-# checkpoint was ever trained with a different value, this needs to match that instead
-NNUE2SCORE = 600.0
 
 # control block, indices relative to OFF_CTL
 CTL_STOP = 0
@@ -289,6 +285,15 @@ def corr_index(bb, side):  # type: ignore[no-untyped-def]
 
 
 @njit(cache=False)
+def raw_eval(bb, st, ply, acc, psqt):  # type: ignore[no-untyped-def]
+    """Uncorrected static eval: NNUE if available, else evaluate.py."""
+    if nnue_mod.NNUE_AVAILABLE:
+        piece_count = popcount(bb[0] | bb[1])
+        return nnue_mod.nnue_eval(acc, psqt, st[0], piece_count, ply)  # already int64 centipawns
+    return np.int64(evaluate(bb, st))
+
+
+@njit(cache=False)
 def corrected_eval(bb, st, mem, ply, acc, psqt):  # type: ignore[no-untyped-def]
     """Static eval, adjusted by whatever this pawn structure's running correction currently
     is. The base evaluator is whichever is available: NNUE if weights.npz was found at import
@@ -296,11 +301,7 @@ def corrected_eval(bb, st, mem, ply, acc, psqt):  # type: ignore[no-untyped-def]
     in predictable ways; this nudges it toward what search has actually been finding for
     similar pawn skeletons, at near-zero cost relative to the search that produced the
     correction in the first place."""
-    if nnue_mod.NNUE_AVAILABLE:
-        piece_count = popcount(bb[0] | bb[1])
-        raw = np.int64(nnue_mod.nnue_eval(acc, psqt, st[0], piece_count, ply) * NNUE2SCORE)
-    else:
-        raw = evaluate(bb, st)
+    raw = raw_eval(bb, st, ply, acc, psqt)
     idx = corr_index(bb, st[0])
     return raw + mem[idx] // CORR_SCALE
 
@@ -331,7 +332,7 @@ def update_correction(mem, bb, st, static_eval, score, depth):  # type: ignore[n
     mem[idx] = entry
 
 
-@njit("i8(i8[:,::1],i8[:,::1],i1[:,::1],f4[:,:,::1],f4[:,:,::1],i8[::1],i8[::1],i8,i8,i8)", cache=False, nogil=True)
+@njit("i8(i8[:,::1],i8[:,::1],i1[:,::1],i2[:,:,::1],i4[:,:,::1],i8[::1],i8[::1],i8,i8,i8)", cache=False, nogil=True)
 def quiesce(bbs, sts, mbs, acc, psqt, mem, tt, ply, alpha, beta):
     """Search captures and promotions until the position is quiet enough to evaluate."""
     if out_of_time(mem):
@@ -392,7 +393,7 @@ def quiesce(bbs, sts, mbs, acc, psqt, mem, tt, ply, alpha, beta):
     return best
 
 
-@njit("i8(i8[:,::1],i8[:,::1],i1[:,::1],f4[:,:,::1],f4[:,:,::1],i8[::1],i8[::1],i8,i8,i8,i8,i8,i8)", cache=False,
+@njit("i8(i8[:,::1],i8[:,::1],i1[:,::1],i2[:,:,::1],i4[:,:,::1],i8[::1],i8[::1],i8,i8,i8,i8,i8,i8)", cache=False,
       nogil=True)
 def negamax(bbs, sts, mbs, acc, psqt, mem, tt, ply, depth, alpha, beta, allow_null, previous):
     if out_of_time(mem):
@@ -428,9 +429,11 @@ def negamax(bbs, sts, mbs, acc, psqt, mem, tt, ply, depth, alpha, beta, allow_nu
     key = sts[ply, 4]
     slot = (key & TT_MASK) * 2
     tt_move = 0
+    tt_raw = np.int64(0)  # cached raw static eval, biased; 0 means none stored
     if tt[slot] == key:
         data = tt[slot + 1]
         tt_move = data & 0x1FFFF
+        tt_raw = (data >> 44) & 0x1FFFF
         if not pv_node and ((data >> 34) & 0xFF) >= depth:
             stored = ((data >> 17) & 0x1FFFF) - TT_SCORE_BIAS
             if stored > MATE_IN_MAX:
@@ -446,8 +449,13 @@ def negamax(bbs, sts, mbs, acc, psqt, mem, tt, ply, depth, alpha, beta, allow_nu
                 return stored
 
     static = -INF
+    raw = np.int64(0)
     if not checked:
-        static = corrected_eval(bbs[ply], sts[ply], mem, ply, acc, psqt)
+        if tt_raw != 0:
+            raw = tt_raw - TT_SCORE_BIAS
+        else:
+            raw = raw_eval(bbs[ply], sts[ply], ply, acc, psqt)
+        static = raw + mem[corr_index(bbs[ply], side)] // CORR_SCALE
 
     if not pv_node and not checked and beta < MATE_IN_MAX and beta > -MATE_IN_MAX:
         # reverse futility: so far above beta that handing over a piece would not bring it below
@@ -584,6 +592,9 @@ def negamax(bbs, sts, mbs, acc, psqt, mem, tt, ply, depth, alpha, beta, allow_nu
         flag = TT_UPPER
     elif best >= beta:
         flag = TT_LOWER
+    raw_packed = np.int64(0)
+    if not checked and raw >= -39999 and raw <= 39999:
+        raw_packed = raw + TT_SCORE_BIAS
     if tt[slot] != key or depth >= ((tt[slot + 1] >> 34) & 0xFF) or flag == TT_EXACT:
         tt[slot] = key
         tt[slot + 1] = (
@@ -591,6 +602,7 @@ def negamax(bbs, sts, mbs, acc, psqt, mem, tt, ply, depth, alpha, beta, allow_nu
             | ((stored + TT_SCORE_BIAS) << 17)
             | (depth << 34)
             | (flag << 42)
+            | (raw_packed << 44)
         )
 
     if not checked and depth >= 1:

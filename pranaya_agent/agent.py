@@ -85,7 +85,7 @@ def _tablebase():
 
 def _book_move(board: chess.Board) -> chess.Move | None:
     reader = _book_reader()
-    if reader is None or board.fullmove_number > 20:
+    if reader is None or board.fullmove_number > 30:
         return None
     try:
         return reader.weighted_choice(board).move
@@ -127,7 +127,12 @@ def _tablebase_move(board: chess.Board) -> chess.Move | None:
         board.pop()
 
         if wdl is None:
-            continue
+            # No verdict for this move. python-chess resolves captures before probing, so a
+            # position whose own material has no table can still be probed when a capture
+            # leads into a table we ship. Choosing among only the probeable moves would then
+            # prefer exactly the moves that hang a piece into a known table, so the tablebase
+            # is used only when every legal move has a verdict; otherwise the search decides.
+            return None
         better = best_wdl is None or wdl > best_wdl
         if not better and wdl == best_wdl and dtz is not None and best_dtz is not None:
             better = dtz < best_dtz

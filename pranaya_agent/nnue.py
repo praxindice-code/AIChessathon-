@@ -10,6 +10,7 @@ Weights load from "weights.npz" next to this file at import time. If that file i
 NNUE_AVAILABLE is False and callers should fall back to evaluate.py's hand-crafted eval.
 """
 
+import math
 import os
 
 import numpy as np
@@ -30,39 +31,52 @@ KING_BUCKETS = np.array([
 ], dtype=np.int64)
 # fmt: on
 
-MAX_FT_ACTIVATION = np.float32(255.0 / 256.0)
-MAX_HIDDEN_ACTIVATION = np.float32(127.0 / 128.0)
-L0_CORRECTION_FACTOR = np.float32(1.0)
-SQR_CRELU_CORRECTION_FACTOR = np.float32(1.0)
-
 _WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.npz")
 NNUE_AVAILABLE = os.path.exists(_WEIGHTS_PATH)
 
 if NNUE_AVAILABLE:
     _npz = np.load(_WEIGHTS_PATH)
-    FT_WEIGHT = _npz["ft_weight"].astype(np.float32)
-    FT_PSQT_WEIGHT = _npz["ft_psqt_weight"].astype(np.float32)
-    FT_BIAS = _npz["ft_bias"].astype(np.float32)
-    LS_L1_WEIGHT = _npz["ls_l1_weight"].astype(np.float32)
-    LS_L1_BIAS = _npz["ls_l1_bias"].astype(np.float32)
-    LS_L2_WEIGHT = _npz["ls_l2_weight"].astype(np.float32)
-    LS_L2_BIAS = _npz["ls_l2_bias"].astype(np.float32)
-    LS_OUT_WEIGHT = _npz["ls_out_weight"].astype(np.float32)
-    LS_OUT_BIAS = _npz["ls_out_bias"].astype(np.float32)
+    # The feature transformer ships as the integers the network was trained against
+    # (nnue-pytorch: weights and biases x256 as int16, psqt x9600 as int32), so the accumulator
+    # is maintained in int16 exactly as Stockfish does: half the bytes per row of fp32 and twice
+    # the lanes per vector add. An accumulator is the bias plus at most 32 rows (33 transiently
+    # inside a diff); the guard checks that even the 33 largest weights of every column cannot
+    # leave int16, since numba integer overflow is silent.
+    FT_WEIGHT = np.ascontiguousarray(_npz["ft_weight"], dtype=np.int16)
+    FT_PSQT_WEIGHT = np.ascontiguousarray(_npz["ft_psqt_weight"], dtype=np.int32)
+    FT_BIAS = np.ascontiguousarray(_npz["ft_bias"], dtype=np.int16)
+    _absw = np.abs(FT_WEIGHT)
+    _bound = np.partition(_absw, _absw.shape[0] - 33, axis=0)[-33:].astype(np.int32).sum(axis=0)
+    _bound += np.abs(FT_BIAS).astype(np.int32)
+    if int(_bound.max()) >= 32767:
+        raise RuntimeError(f"int16 accumulator could overflow: column bound {int(_bound.max())}")
+    del _absw, _bound
+    # The layer stacks ship already quantized: int8 weights and int32 biases on the scales the
+    # network was trained against (nnue-pytorch: L1 weight x128, L2 x64, output x128, each
+    # bias x weight-scale x128). They are held as float32 carrying those integer values:
+    # every product and partial sum in forward() is an integer below 2**24, so float32
+    # arithmetic on them is exact, and it is the arithmetic LLVM vectorises well. L1 is
+    # transposed to (bucket, input, output) so the 32 weights of one input are contiguous.
+    LS_L1_WT = np.ascontiguousarray(_npz["ls_l1_weight"].transpose(0, 2, 1)).astype(np.float32)
+    LS_L1_BQ = _npz["ls_l1_bias"].astype(np.int64)
+    LS_L2_WQ = np.ascontiguousarray(_npz["ls_l2_weight"]).astype(np.float32)
+    LS_L2_BQ = _npz["ls_l2_bias"].astype(np.int64)
+    LS_OUT_WQ = np.ascontiguousarray(_npz["ls_out_weight"][:, 0, :]).astype(np.float32)
+    LS_OUT_BQ = _npz["ls_out_bias"][:, 0].astype(np.int64)
     L1 = int(_npz["meta_L1"])
     NUM_PSQT_BUCKETS = int(_npz["meta_num_psqt_buckets"])
 else:
     # placeholder zero-size arrays so the module still imports cleanly and njit functions below
     # still compile (numba needs concrete array types even if they're never actually reached)
-    FT_WEIGHT = np.zeros((1, 1024), dtype=np.float32)
-    FT_PSQT_WEIGHT = np.zeros((1, 8), dtype=np.float32)
-    FT_BIAS = np.zeros(1024, dtype=np.float32)
-    LS_L1_WEIGHT = np.zeros((8, 32, 1024), dtype=np.float32)
-    LS_L1_BIAS = np.zeros((8, 32), dtype=np.float32)
-    LS_L2_WEIGHT = np.zeros((8, 32, 64), dtype=np.float32)
-    LS_L2_BIAS = np.zeros((8, 32), dtype=np.float32)
-    LS_OUT_WEIGHT = np.zeros((8, 1, 128), dtype=np.float32)
-    LS_OUT_BIAS = np.zeros((8, 1), dtype=np.float32)
+    FT_WEIGHT = np.zeros((1, 1024), dtype=np.int16)
+    FT_PSQT_WEIGHT = np.zeros((1, 8), dtype=np.int32)
+    FT_BIAS = np.zeros(1024, dtype=np.int16)
+    LS_L1_WT = np.zeros((8, 1024, 32), dtype=np.float32)
+    LS_L1_BQ = np.zeros((8, 32), dtype=np.int64)
+    LS_L2_WQ = np.zeros((8, 32, 64), dtype=np.float32)
+    LS_L2_BQ = np.zeros((8, 32), dtype=np.int64)
+    LS_OUT_WQ = np.zeros((8, 128), dtype=np.float32)
+    LS_OUT_BQ = np.zeros(8, dtype=np.int64)
     L1 = 1024
     NUM_PSQT_BUCKETS = 8
 
@@ -113,14 +127,12 @@ def nnue_make_move(bbs, mbs, acc, psqt, ply):  # type: ignore[no-untyped-def]
 def _apply_diff(bbs, mbs, ply, is_white_pov, acc_out, psqt_out):  # type: ignore[no-untyped-def]
     pov_colour = 0 if is_white_pov else 1
     king_sq = lsb(bbs[ply, 7] & bbs[ply, pov_colour])
-    # Option A optimization: iterate only over squares that actually changed. Build a bitboard
-    # of changed squares by XORing all 8 bitboard planes (white, black, and the 6 piece-type
-    # planes) between ply and ply+1 — any square whose contents changed will have at least one
-    # bit differ across some plane. This covers piece add/remove (color bit flips), promotion
-    # (piece-type bit changes), and same-type capture (color bits flip). Typically only 2-4
-    # squares change per move, so this replaces ~60 wasted branchy iterations with a few
-    # `lsb`-driven ones. Backup of the original 64-square-scan version lives at
-    # `nnue_pre_optionA.py.bak` in the same folder.
+    # Iterate only over squares that actually changed. XORing all 8 bitboard planes (white,
+    # black, and the 6 piece-type planes) between ply and ply+1 gives a bitboard where any
+    # square whose contents changed has at least one bit set. This covers piece add/remove
+    # (colour bit flips), promotion (piece-type bit changes), and same-type capture (colour
+    # bits flip). Only 2 to 4 squares change on a typical move, so this replaces ~60 wasted
+    # branchy iterations of a full 64-square scan with a few lsb-driven ones.
     changed = np.int64(0)
     for plane in range(8):
         changed |= bbs[ply, plane] ^ bbs[ply + 1, plane]
@@ -155,7 +167,8 @@ def nnue_make_null(acc, psqt, ply):  # type: ignore[no-untyped-def]
 def nnue_eval(acc, psqt, side, piece_count, ply):  # type: ignore[no-untyped-def]
     """Reads this ply's already-maintained accumulators (via nnue_make_move/nnue_make_null)
     and runs the forward pass. Does not touch the board at all -- purely a function of
-    whatever's already sitting in acc/psqt[ply]."""
+    whatever's already sitting in acc/psqt[ply]. Returns the evaluation in centipawns as an
+    int64, from the side to move's point of view."""
     return forward(acc[ply, 0], acc[ply, 1], psqt[ply, 0], psqt[ply, 1], side, piece_count)
 
 
@@ -164,11 +177,11 @@ def new_accumulator_stack():
     independent search context (agent.py needs a separate pair for the main search and for the
     pondering thread, exactly like PONDER_BBS is separate from BBS)."""
     if NNUE_AVAILABLE:
-        acc = np.zeros((NNUE_STACK_SIZE, 2, L1), dtype=np.float32)
-        psqt = np.zeros((NNUE_STACK_SIZE, 2, NUM_PSQT_BUCKETS), dtype=np.float32)
+        acc = np.zeros((NNUE_STACK_SIZE, 2, L1), dtype=np.int16)
+        psqt = np.zeros((NNUE_STACK_SIZE, 2, NUM_PSQT_BUCKETS), dtype=np.int32)
     else:
-        acc = np.zeros((NNUE_STACK_SIZE, 2, 1), dtype=np.float32)
-        psqt = np.zeros((NNUE_STACK_SIZE, 2, 1), dtype=np.float32)
+        acc = np.zeros((NNUE_STACK_SIZE, 2, 1), dtype=np.int16)
+        psqt = np.zeros((NNUE_STACK_SIZE, 2, 1), dtype=np.int32)
     return acc, psqt
 
 
@@ -207,7 +220,7 @@ def refresh_accumulator(bb, is_white_pov, acc_out, psqt_out):  # type: ignore[no
     king_sq = lsb(bb[7] & bb[pov_colour])
 
     acc_out[:] = FT_BIAS
-    psqt_out[:] = 0.0
+    psqt_out[:] = 0
 
     for colour in range(2):
         piece_is_white = colour == 0
@@ -221,80 +234,90 @@ def refresh_accumulator(bb, is_white_pov, acc_out, psqt_out):  # type: ignore[no
                 psqt_out += FT_PSQT_WEIGHT[idx]
 
 
+_Q = L1 // 2
+_F0 = np.float32(0.0); _F255 = np.float32(255.0)
+_INV512 = np.float32(1.0 / 512.0)
+
+
 @njit(cache=False, fastmath=True)
 def forward(white_acc, black_acc, white_psqt, black_psqt, side, piece_count):  # type: ignore[no-untyped-def]
-    """Combines both perspectives' raw accumulators into a final centipawn-ish score. `side`:
-    0 = white to move, 1 = black to move."""
-    us = np.float32(1.0) if side == 0 else np.float32(0.0)
-
+    """Forward pass with the integer semantics the network was trained under (nnue-pytorch's
+    fake quantization): activations live on fixed grids and are floored onto them at every
+    layer, exactly as Stockfish's integer inference does. Units: the accumulator is already
+    int16 on the 1/256 grid, hidden activations to the 1/128 grid, L1 sums are in 1/16384, L2 sums in
+    1/8192, the output in 1/16384; x600 converts to centipawns. All arithmetic is on
+    integer-valued float32 with every partial sum below 2**24, so it never rounds. L1 is
+    evaluated only over the nonzero inputs (typically ~15% of them), eight per iteration.
+    `side`: 0 = white to move, 1 = black to move. Returns int64 centipawns."""
     if side == 0:
-        own_raw, opp_raw = white_acc, black_acc
+        own = white_acc; opp = black_acc; us = 1.0
     else:
-        own_raw, opp_raw = black_acc, white_acc
-
-    l0 = np.empty(2 * L1, dtype=np.float32)
+        own = black_acc; opp = white_acc; us = 0.0
+    l0 = np.empty(L1, dtype=np.float32)
+    for i in range(_Q):
+        a0 = max(min(np.float32(own[i]), _F255), _F0)
+        a1 = max(min(np.float32(own[_Q + i]), _F255), _F0)
+        l0[i] = np.float32(np.int32(a0 * a1 * _INV512))
+        c0 = max(min(np.float32(opp[i]), _F255), _F0)
+        c1 = max(min(np.float32(opp[_Q + i]), _F255), _F0)
+        l0[_Q + i] = np.float32(np.int32(c0 * c1 * _INV512))
+    nz = np.empty(L1, dtype=np.int32)
+    n = 0
     for i in range(L1):
-        v = own_raw[i]
-        l0[i] = min(max(v, np.float32(0.0)), MAX_FT_ACTIVATION)
-    for i in range(L1):
-        v = opp_raw[i]
-        l0[L1 + i] = min(max(v, np.float32(0.0)), MAX_FT_ACTIVATION)
-
-    q = L1 // 2
-    l0_final = np.empty(L1, dtype=np.float32)
-    for i in range(q):
-        l0_final[i] = l0[i] * l0[q + i]
-    for i in range(q):
-        l0_final[q + i] = l0[L1 + i] * l0[L1 + q + i]
-    for i in range(L1):
-        l0_final[i] *= L0_CORRECTION_FACTOR
+        nz[n] = i
+        n += (l0[i] != _F0)
 
     bucket = (piece_count - 1) // 4
     if bucket >= NUM_PSQT_BUCKETS:
         bucket = NUM_PSQT_BUCKETS - 1  # defensive clamp; shouldn't trigger in real chess
-
-    # Explicit multiply-accumulate loops replace `@` matmul so numba can compile without
-    # BLAS (numba's `@` implementation calls into scipy.linalg's BLAS bindings, and the
-    # chessathon sandbox's Python doesn't ship scipy). The math is identical.
-    l1c = np.empty(32, dtype=np.float32)
+    wt = LS_L1_WT[bucket]
+    acc = np.zeros(32, dtype=np.float32)
+    k = 0
+    while k + 7 < n:
+        j0 = nz[k]; x0 = l0[j0]; j1 = nz[k + 1]; x1 = l0[j1]; j2 = nz[k + 2]; x2 = l0[j2]; j3 = nz[k + 3]; x3 = l0[j3]
+        j4 = nz[k + 4]; x4 = l0[j4]; j5 = nz[k + 5]; x5 = l0[j5]; j6 = nz[k + 6]; x6 = l0[j6]; j7 = nz[k + 7]; x7 = l0[j7]
+        for i in range(32):
+            acc[i] += (wt[j0, i] * x0 + wt[j1, i] * x1 + wt[j2, i] * x2 + wt[j3, i] * x3
+                       + wt[j4, i] * x4 + wt[j5, i] * x5 + wt[j6, i] * x6 + wt[j7, i] * x7)
+        k += 8
+    while k < n:
+        j0 = nz[k]; x0 = l0[j0]
+        for i in range(32):
+            acc[i] += wt[j0, i] * x0
+        k += 1
+    l1c = np.empty(32, dtype=np.int64)
     for i in range(32):
-        s = np.float32(0.0)
-        for j in range(L1):
-            s += LS_L1_WEIGHT[bucket, i, j] * l0_final[j]
-        l1c[i] = s + LS_L1_BIAS[bucket, i]
-    skip = l1c[-2] - l1c[-1]
+        l1c[i] = np.int64(acc[i]) + LS_L1_BQ[bucket, i]
+    skip = l1c[30] - l1c[31]
 
     l1x = np.empty(64, dtype=np.float32)
     for i in range(32):
-        sq = l1c[i] * l1c[i] * SQR_CRELU_CORRECTION_FACTOR
-        l1x[i] = min(max(sq, np.float32(0.0)), MAX_HIDDEN_ACTIVATION)
+        t = min(max(l1c[i], -16384), 16384)
+        l1x[i] = np.float32(min((t * t) >> 21, 127))
+        l1x[32 + i] = np.float32(min(max(l1c[i] >> 7, 0), 127))
+    w2 = LS_L2_WQ[bucket]
+    l2c = np.empty(32, dtype=np.int64)
     for i in range(32):
-        l1x[32 + i] = min(max(l1c[i], np.float32(0.0)), MAX_HIDDEN_ACTIVATION)
-
-    l2c = np.empty(32, dtype=np.float32)
-    for i in range(32):
-        s = np.float32(0.0)
+        s = _F0
         for j in range(64):
-            s += LS_L2_WEIGHT[bucket, i, j] * l1x[j]
-        l2c[i] = s + LS_L2_BIAS[bucket, i]
-
+            s += w2[i, j] * l1x[j]
+        l2c[i] = np.int64(s) + LS_L2_BQ[bucket, i]
     l2x = np.empty(64, dtype=np.float32)
     for i in range(32):
-        sq = l2c[i] * l2c[i] * SQR_CRELU_CORRECTION_FACTOR
-        l2x[i] = min(max(sq, np.float32(0.0)), MAX_HIDDEN_ACTIVATION)
-    for i in range(32):
-        l2x[32 + i] = min(max(l2c[i], np.float32(0.0)), MAX_HIDDEN_ACTIVATION)
+        t = min(max(l2c[i], -8192), 8192)
+        l2x[i] = np.float32(min((t * t) >> 19, 127))
+        l2x[32 + i] = np.float32(min(max(l2c[i] >> 6, 0), 127))
+    wo = LS_OUT_WQ[bucket]
+    s = _F0
+    for j in range(64):
+        s += wo[j] * l1x[j]
+    for j in range(64):
+        s += wo[64 + j] * l2x[j]
+    raw = np.int64(s) + LS_OUT_BQ[bucket] + skip
 
-    l3_input = np.empty(128, dtype=np.float32)
-    l3_input[:64] = l1x
-    l3_input[64:] = l2x
-
-    l3c = np.float32(0.0)
-    for j in range(128):
-        l3c += LS_OUT_WEIGHT[bucket, 0, j] * l3_input[j]
-    l3c += LS_OUT_BIAS[bucket, 0]
-    raw_output = l3c + skip
-
-    wpsqt = white_psqt[bucket]
-    bpsqt = black_psqt[bucket]
-    return raw_output + (wpsqt - bpsqt) * (us - np.float32(0.5))
+    wpsqt = np.float64(white_psqt[bucket])
+    bpsqt = np.float64(black_psqt[bucket])
+    # 600/16384 = 75/2048 and 600/9600 = 1/16 are dyadic, so on these integers the float64 sum
+    # is exact and the truncation is unambiguous on any IEEE machine
+    val = np.float64(raw) * (600.0 / 16384.0) + (wpsqt - bpsqt) * (us - 0.5) * (600.0 / 9600.0)
+    return np.int64(math.trunc(val))
