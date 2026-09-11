@@ -1,0 +1,1 @@
+Essentially what we did was we took Jaes first agents as a baseline then trained a bullet vs rust nnue on their respective datasets, afterwards Praxindice ran a series of search optimization test while Sam optimized search agent and etc. through integer conversion and also some alterations to how our bot plays.

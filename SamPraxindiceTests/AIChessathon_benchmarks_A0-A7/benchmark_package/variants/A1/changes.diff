@@ -1,0 +1,13 @@
+--- previous/search.py
++++ A1/search.py
+@@ -485,9 +485,7 @@
+             if score >= beta:
+                 return beta if score > MATE_IN_MAX else score
+ 
+-    # with no hint from the table, a shallower search is cheaper than a badly ordered one
+-    if tt_move == 0 and depth >= 5:
+-        depth -= 1
++    # A1: keep requested depth even when there is no TT move.
+ 
+     start = ply * MOVE_SLOTS
+     end = gen_moves(bbs[ply], sts[ply], mbs[ply], mem[OFF_MOVES:], start)

@@ -1,0 +1,3 @@
+python-chess>=1.999
+psutil>=5.9
+# Also install your engine's original requirements (NumPy, Numba, NNUE dependencies).

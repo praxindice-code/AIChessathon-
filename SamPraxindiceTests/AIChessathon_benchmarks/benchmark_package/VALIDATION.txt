@@ -1,0 +1,3 @@
+Python syntax: PASS (19 files)
+Regression tests: PASS (5 tests)
+Full NNUE/Numba runtime and real Stockfish matches: not run.

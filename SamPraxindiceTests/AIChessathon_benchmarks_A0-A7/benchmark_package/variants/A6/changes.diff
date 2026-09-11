@@ -1,0 +1,21 @@
+--- previous/search.py
++++ A6/search.py
+@@ -758,6 +758,7 @@
+                 mem[OFF_CTL + CTL_BEST_MOVE] = mem[OFF_CTL + CTL_ROOT_MOVE]
+             break
+ 
++        previous_score = best_score
+         best_score = score
+         settled = mem[OFF_CTL + CTL_ROOT_MOVE] == mem[OFF_CTL + CTL_BEST_MOVE]
+         mem[OFF_CTL + CTL_BEST_MOVE] = mem[OFF_CTL + CTL_ROOT_MOVE]
+@@ -773,7 +774,9 @@
+         # when the last iteration changed its mind, the position is not understood yet, so
+         # spend part of the gap up to the hard limit rather than moving on the newer guess
+         limit = mem[OFF_CTL + CTL_SOFT_NS]
+-        if not settled and depth >= 5:
++        score_drop = (abs(previous_score) < MATE_IN_MAX and abs(score) < MATE_IN_MAX
++                      and previous_score - score >= 80)
++        if depth >= 5 and (not settled or score_drop):
+             limit += (mem[OFF_CTL + CTL_HARD_NS] - limit) // 3
+         if now_ns() >= limit:
+             break

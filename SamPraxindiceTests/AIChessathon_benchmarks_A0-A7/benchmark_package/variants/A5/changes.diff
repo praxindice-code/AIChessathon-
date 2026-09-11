@@ -1,0 +1,20 @@
+--- previous/search.py
++++ A5/search.py
+@@ -101,7 +101,7 @@
+         _lmr[_depth, _index] = int(0.80 + np.log(_depth) * np.log(_index) / 2.30)
+ LMR = _lmr
+ 
+-FUTILITY = np.array([0, 110, 210, 320, 450, 600, 780, 980], dtype=np.int64)
++FUTILITY = np.array([0, 160, 300, 450, 620, 800, 1000, 1250], dtype=np.int64)
+ LATE_MOVE_COUNT = np.array([0, 8, 12, 20, 30, 42, 56, 72], dtype=np.int64)
+ 
+ 
+@@ -514,7 +514,7 @@
+     best_move = 0
+     legal = 0
+     original_alpha = alpha
+-    futile = not checked and not pv_node and depth <= 7 and static + FUTILITY[depth] <= alpha
++    futile = not checked and not pv_node and depth <= 4 and static + FUTILITY[depth] <= alpha
+ 
+     for current in range(start, end):
+         move = pick_move(mem, current, end)

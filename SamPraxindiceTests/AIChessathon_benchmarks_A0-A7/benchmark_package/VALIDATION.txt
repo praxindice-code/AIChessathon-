@@ -1,0 +1,6 @@
+Python syntax: PASS (22 files)
+Regression tests: PASS (6 tests, including soft deadline checks)
+A6/A7: real HalfKA NNUE import/Numba compilation and legal-move smoke tests PASS
+A7: quiet-check mate, zero budget, stalemate, mate precedence, mandatory evasion PASS
+Real Stockfish matches / playing strength / Bullet runtime: not measured
+Original engine files unchanged; only search.py replacement needed.

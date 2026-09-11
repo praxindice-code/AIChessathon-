@@ -1,0 +1,25 @@
+A6 -- NOT IMPLEMENTED; do not label A5 as A6
+The supplied reference/agent.py is available. Its _budget_ms() sets soft/hard
+limits in _choose(). search.think() already extends time on best-move changes.
+For a separate score-instability experiment, track the previous COMPLETED
+iteration score before assigning best_score. On a non-mate score drop of an
+initial experimental 80 cp at depth >= 5, extend the local soft deadline by
+one third of the remaining gap to CTL_HARD_NS. Never move CTL_HARD_NS or add
+time beyond the remaining clock minus agent.OVERHEAD_MS. Avoid stacking the
+existing best-move-change extension twice. Reset state on each think() call.
+Review _budget_ms(), _choose(), and pondering together before implementing.
+Test stable scores, score drops, mate scores, panic clocks, and interrupted
+iterations. Benchmark flag rate as well as score. Threshold is a hypothesis.
+
+A7 -- NOT IMPLEMENTED; requires deliberate qsearch changes
+Start from validated A6 (or label a separate A5+qchecks experiment).
+Add a bounded quiet-check budget (initial experiment: one checking ply),
+passed through every quiesce call and its explicit Numba signature. In quiet
+nodes generate candidates, make/legality-check each move, and admit quiet
+moves only if they give check and budget remains. Decrement budget for quiet
+checks. Do not apply capture delta/SEE pruning to those quiet checking moves.
+In-check nodes must still search ALL legal evasions even at zero budget.
+Maintain NNUE accumulators, repetition path and MAXPLY protections. Add draw
+and cycle handling to qsearch deliberately; A4 only changes negamax repetition.
+Test quiet-check mates, counterchecks, evasions, promotions, stalemate, long
+checking cycles, and Numba compilation. Measure node growth and clock losses.

@@ -1,0 +1,41 @@
+A6 AND A7 -- IMPLEMENTED CUMULATIVE SEARCH VARIANTS
+
+Copy your chosen complete engine into engines/A6 and engines/A7, then replace
+only search.py with variants/A6/search.py or variants/A7/search.py respectively.
+Your supplied agent.py already supplies soft/hard deadlines, so NO agent.py
+change is required. Keep matching NNUE loaders and weights in each copy.
+
+A6 = A5 + score-drop time extension
+After a completed iteration at depth >=5, compare with the preceding completed
+iteration. A non-mate score drop >=80cp OR a best-move change permits one third
+of the gap from the original soft deadline to the hard deadline. These triggers
+do not stack. Hard deadline never changes. Interrupted iterations cannot trigger
+the extension. Scores reset on every think(), including pondering.
+
+A7 = A6 + selective quiescence checks
+Each entry from negamax/razoring gets one optional quiet check per path.
+Captures/promotions preserve this budget; elective quiet checks consume it.
+In-check nodes search all legal evasions regardless of budget. Mandatory
+counterchecking evasions do not consume the elective-check budget.
+Quiet checks bypass capture pruning. Promotions also bypass capture SEE/delta
+pruning in this variant. The previous whole-node delta shortcut is removed
+so it cannot hide quiet checks. Bad captures are skipped individually.
+All moves are generated and legal-move existence is checked before stand pat,
+so stalemate scores zero and mate takes precedence over a draw counter.
+Quiescence checks threefold, the halfmove clock and insufficient material.
+MAXPLY and existing node-clock checks bound extended checking sequences.
+The MAXPLY evaluation fallback and inherited negamax draw ordering remain
+unchanged. This is not a complete rules/search correctness overhaul.
+Extra move generation and legality checks may reduce NPS; benchmark strength.
+
+From package folder after setting up engines/A5, engines/A6 and engines/A7:
+  python play_match_head_to_head.py --engine-a engines/A6 --engine-b engines/A5 --games 200 --workers 1 --base 60 --increment 0.5 --pgn-out results/A6_A5.pgn
+  python play_match_head_to_head.py --engine-a engines/A7 --engine-b engines/A6 --games 200 --workers 1 --base 60 --increment 0.5 --pgn-out results/A7_A6.pgn
+Use README.txt for Stockfish comparisons and one-core testing options.
+
+Runtime test with HalfKA files (temporary copies; originals untouched):
+  python test_search_runtime.py --engine-dir "C:\Users\punam\coding\bullet_agent\pranaya_agent\trueAgentV5H"
+Tests compile A6/A7 with HalfKA NNUE and exercise legal move selection.
+A7 tests cover quiet-check mate, zero check budget, stalemate, mate at halfmove
+100, and mandatory evasion at zero check budget. These are smoke tests, not
+strength measurements. No Bullet runtime claim follows from HalfKA tests.

@@ -1,0 +1,66 @@
+--- previous/search.py
++++ A4/search.py
+@@ -91,6 +91,7 @@
+ CTL_HARD_NS = 9
+ CTL_SOFT_NS = 10
+ CTL_STABLE = 11
++CTL_REP_FLOOR = 12  # boundary after the latest synthetic null move
+ 
+ SEE_VALUE = np.array([0, 100, 320, 330, 500, 900, 20000], dtype=np.int64)
+ 
+@@ -251,14 +252,26 @@
+ 
+ @njit(cache=False)
+ def repeated(sts, mem, ply):  # type: ignore[no-untyped-def]
+-    """Has this exact position occurred before, in the search path or earlier in the game?"""
++    """Require two prior occurrences; never count across a synthetic null move.
++
++    This is a strict threefold experiment, not a claim that twofold search-cycle
++    detection is always wrong. Root/game history is supplied by agent.py.
++    """
+     key = sts[ply, 4]
+     limit = sts[ply, 3]
+-    index = OFF_PATH + mem[OFF_CTL + CTL_BASE] + ply
++    base = OFF_PATH + mem[OFF_CTL + CTL_BASE]
++    index = base + ply
++    floor = OFF_PATH
++    null_floor = mem[OFF_CTL + CTL_REP_FLOOR]
++    if null_floor > 0:
++        floor = base + null_floor
++    matches = 0
+     back = 2
+-    while back <= limit and index - back >= OFF_PATH:
++    while back <= limit and index - back >= floor:
+         if mem[index - back] == key:
+-            return True
++            matches += 1
++            if matches >= 2:
++                return True
+         back += 2
+     return False
+ 
+@@ -472,6 +485,8 @@
+         heavy = (bbs[ply, 3] | bbs[ply, 4] | bbs[ply, 5] | bbs[ply, 6]) & bbs[ply, side]
+         if allow_null != 0 and depth >= 3 and static >= beta and heavy != 0:
+             reduction = 3 + depth // 5
++            saved_floor = mem[OFF_CTL + CTL_REP_FLOOR]
++            mem[OFF_CTL + CTL_REP_FLOOR] = ply + 1
+             make_null(bbs, sts, mbs, ply)
+             if nnue_mod.NNUE_AVAILABLE:
+                 nnue_mod.nnue_make_null(acc, psqt, ply)
+@@ -480,6 +495,7 @@
+                 bbs, sts, mbs, acc, psqt, mem, tt, ply + 1, depth - 1 - reduction,
+                 -beta, -beta + 1, null_off, no_move,
+             )
++            mem[OFF_CTL + CTL_REP_FLOOR] = saved_floor
+             if mem[OFF_CTL + CTL_STOP] != 0:
+                 return 0
+             if score >= beta:
+@@ -691,6 +707,7 @@
+     """Iterative deepening. Leaves the chosen move in the control block and always has one."""
+     mem[OFF_CTL + CTL_STOP] = 0
+     mem[OFF_CTL + CTL_NODES] = 0
++    mem[OFF_CTL + CTL_REP_FLOOR] = 0
+     if nnue_mod.NNUE_AVAILABLE:
+         nnue_mod.nnue_init_root(bbs[0], acc, psqt)
+     for ply in range(STACK * 2):

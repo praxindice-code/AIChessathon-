@@ -1,0 +1,12 @@
+--- previous/search.py
++++ A3/search.py
+@@ -514,7 +514,8 @@
+                 # three second budget, which is more than the accuracy it bought back
+                 if not pv_node and not checked and depth <= 5 and legal >= LATE_MOVE_COUNT[depth]:
+                     continue
+-            elif capture and depth <= 6 and see(bbs, mbs, mem, ply, move) < -60 * depth:
++            elif (capture and (move >> 12) & 7 == 0 and not checked and not pv_node
++                  and depth <= 4 and see(bbs, mbs, mem, ply, move) < -100 * depth):
+                 continue
+ 
+         make_move(bbs, sts, mbs, ply, move)

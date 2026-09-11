@@ -1,0 +1,75 @@
+@njit("i8(i8[:,::1],i8[:,::1],i1[:,::1],f4[:,:,::1],f4[:,:,::1],i8[::1],i8[::1],i8,i8,i8,i8)", cache=False, nogil=True)
+def quiesce(bbs, sts, mbs, acc, psqt, mem, tt, ply, alpha, beta, checks_left):
+    """Captures/promotions plus at most one elective quiet check per qsearch path.
+
+    Evasions remain mandatory. Generate all moves to distinguish stalemate before
+    stand pat; this correctness check has a measurable cost to benchmark.
+    """
+    if out_of_time(mem):
+        return 0
+    if ply >= MAXPLY:
+        return corrected_eval(bbs[ply], sts[ply], mem, ply, acc, psqt)
+    side = sts[ply, 0]
+    checked = in_check(bbs[ply], side)
+    start = ply * MOVE_SLOTS
+    end = gen_moves(bbs[ply], sts[ply], mbs[ply], mem[OFF_MOVES:], start)
+    has_legal = False
+    for index in range(start, end):
+        make_move(bbs, sts, mbs, ply, mem[OFF_MOVES + index])
+        if not in_check(bbs[ply + 1], side):
+            has_legal = True
+            break
+    if not has_legal:
+        return -MATE + ply if checked else 0
+    if sts[ply, 3] >= 100 or repeated(sts, mem, ply) or insufficient_material(bbs[ply]):
+        return 0
+    best = -INF
+    stand_pat = -INF
+    if not checked:
+        stand_pat = corrected_eval(bbs[ply], sts[ply], mem, ply, acc, psqt)
+        best = stand_pat
+        if best >= beta:
+            return best
+        if best > alpha:
+            alpha = best
+    none = np.int64(0)
+    score_moves(bbs, mbs, sts, mem, ply, start, end, none, none)
+    base = OFF_PATH + mem[OFF_CTL + CTL_BASE]
+    for current in range(start, end):
+        move = pick_move(mem, current, end)
+        to = (move >> 6) & 63
+        flag = (move >> 15) & 3
+        promo = (move >> 12) & 7
+        victim = SEE_VALUE[1] if flag == FLAG_EP else SEE_VALUE[mbs[ply, to]]
+        quiet = victim == 0 and promo == 0
+        if not checked:
+            if quiet:
+                if checks_left <= 0:
+                    continue
+            elif promo == 0:
+                if mem[OFF_SCORES + current] < 0:
+                    continue
+                if stand_pat + victim + 200 < alpha:
+                    continue
+        make_move(bbs, sts, mbs, ply, move)
+        if in_check(bbs[ply + 1], side):
+            continue
+        next_checks = checks_left
+        if quiet and not checked:
+            if not in_check(bbs[ply + 1], 1 - side):
+                continue
+            next_checks -= 1
+        if nnue_mod.NNUE_AVAILABLE:
+            nnue_mod.nnue_make_move(bbs, mbs, acc, psqt, ply)
+        mem[base + ply + 1] = sts[ply + 1, 4]
+        score = -quiesce(bbs, sts, mbs, acc, psqt, mem, tt, ply + 1,
+                         -beta, -alpha, next_checks)
+        if mem[OFF_CTL + CTL_STOP] != 0:
+            return 0
+        if score > best:
+            best = score
+            if score > alpha:
+                alpha = score
+                if score >= beta:
+                    break
+    return best
